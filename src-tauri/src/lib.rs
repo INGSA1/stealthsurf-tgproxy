@@ -21,7 +21,8 @@ async fn start_proxy(
     state: State<'_, ProxyState>, 
     token: String, 
     local_port: u16,
-    custom_sni: String
+    custom_sni: String,
+    share_local: bool // ДОБАВИЛИ ФЛАГ ШЕРИНГА С ФРОНТЕНДА
 ) -> Result<(), String> {
     let client = reqwest::Client::new();
     let response = client
@@ -69,12 +70,15 @@ async fn start_proxy(
         sni = custom_sni; 
     }
 
+    // Если шаринг включен — слушаем 0.0.0.0 (всю локальную сеть), иначе — строго локальный 127.0.0.1
+    let listen_address = if share_local { "0.0.0.0" } else { "127.0.0.1" };
+
     let singbox_config = json!({
         "inbounds": [
             {
                 "type": "socks",
                 "tag": "socks-in",
-                "listen": "127.0.0.1",
+                "listen": listen_address,
                 "listen_port": local_port
             }
         ],
@@ -194,9 +198,6 @@ fn open_telegram(port: u16) -> Result<(), String> {
     Ok(())
 }
 
-// ----------------------------------------------------
-// НОВАЯ КОМАНДА: УПРАВЛЕНИЕ АВТОЗАПУСКОМ В РЕЕСТРЕ WINDOWS
-// ----------------------------------------------------
 #[tauri::command]
 fn set_autostart(enabled: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
@@ -207,7 +208,6 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
             .to_string();
 
         if enabled {
-            // Прописываем запуск нашего exe с флагом --autostart
             let exe_path_with_arg = format!("\"{}\" --autostart", exe_path);
             std::process::Command::new("reg")
                 .args([
@@ -224,7 +224,6 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
                 .spawn()
                 .map_err(|e| e.to_string())?;
         } else {
-            // Удаляем запись из реестра
             std::process::Command::new("reg")
                 .args([
                     "delete",
@@ -240,6 +239,20 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
+// ----------------------------------------------------
+// НОВАЯ КОМАНДА: АВТОМАТИЧЕСКИЙ ПОИСК ЛОКАЛЬНОГО IP НА ПК
+// ----------------------------------------------------
+#[tauri::command]
+fn get_local_ip() -> Result<String, String> {
+    use std::net::UdpSocket;
+    // Гениальный сетевой трюк: подключаемся к фейковому внешнему DNS-адресу.
+    // Пакеты на самом деле не отправляются, но ОС вынуждена выдать сокету активный IP нашей Wi-Fi/Ethernet карты.
+    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+    socket.connect("8.8.8.8:80").map_err(|e| e.to_string())?;
+    let local_addr = socket.local_addr().map_err(|e| e.to_string())?;
+    Ok(local_addr.ip().to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -247,8 +260,8 @@ pub fn run() {
         .manage(ProxyState {
             child_process: Mutex::new(None),
         })
-        // Регистрируем новую команду автозагрузки в Tauri
-        .invoke_handler(tauri::generate_handler![start_proxy, stop_proxy, open_telegram, set_autostart])
+        // Не забыли зарегистрировать get_local_ip!
+        .invoke_handler(tauri::generate_handler![start_proxy, stop_proxy, open_telegram, set_autostart, get_local_ip])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 window.hide().unwrap();
@@ -256,15 +269,12 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            // ----------------------------------------------------
-            // ПРОВЕРКА ЗАПУСКА: ЕСЛИ ИЗ АВТОЗАГРУЗКИ — ЗАПУСКАЕМ СВЕРНУТЫМ
-            // ----------------------------------------------------
             let args: Vec<String> = std::env::args().collect();
             let start_minimized = args.iter().any(|arg| arg == "--autostart");
 
             if start_minimized {
                 if let Some(window) = app.get_webview_window("main") {
-                    window.hide().unwrap(); // Прячем окно сразу при старте ОС
+                    window.hide().unwrap(); 
                 }
             }
 
@@ -293,7 +303,6 @@ pub fn run() {
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
-                    // ФИКС КЛИКА: Теперь левый клик всегда показывает/фокусирует окно
                     if let TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {

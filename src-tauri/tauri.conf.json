@@ -12,9 +12,9 @@
   "app": {
     "windows": [
       {
-        "title": "tgproxy",
-        "width": 800,
-        "height": 600
+        "title": "StealthSurf TG Proxy",
+        "width": 640,
+        "height": 500
       }
     ],
     "security": {
