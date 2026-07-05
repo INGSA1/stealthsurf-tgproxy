@@ -1,16 +1,50 @@
-import './App.css';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import './App.css';
 
 export default function App() {
-  const [token, setToken] = useState('');
-  const [port, setPort] = useState(10808);
-  const [sni, setSni] = useState(''); // Сделали пустым по дефолту, раз работает без SNI
+  // Инициализируем стейты значениями из localStorage (если они сохранены)
+  const [token, setToken] = useState(() => localStorage.getItem('token') || '');
+  const [port, setPort] = useState(() => Number(localStorage.getItem('port')) || 10808);
+  const [sni, setSni] = useState(() => localStorage.getItem('sni') || '');
+  
+  // Новые настройки
+  const [autoConnect, setAutoConnect] = useState(() => localStorage.getItem('autoConnect') === 'true');
+  const [autostart, setAutostart] = useState(() => localStorage.getItem('autostart') === 'true');
+
   const [isConnected, setIsConnected] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const handleConnect = async () => {
+  // Сохраняем настройки при их изменении
+  useEffect(() => {
+    localStorage.setItem('token', token);
+  }, [token]);
+
+  useEffect(() => {
+    localStorage.setItem('port', port.toString());
+  }, [port]);
+
+  useEffect(() => {
+    localStorage.setItem('sni', sni);
+  }, [sni]);
+
+  useEffect(() => {
+    localStorage.setItem('autoConnect', autoConnect.toString());
+  }, [autoConnect]);
+
+  // При переключении галочки автозапуска вызываем команду реестра в Rust
+  const handleToggleAutostart = async (checked: boolean) => {
+    setAutostart(checked);
+    localStorage.setItem('autostart', checked.toString());
+    try {
+      await invoke('set_autostart', { enabled: checked });
+    } catch (err: any) {
+      setError(`Ошибка автозапуска: ${err.toString()}`);
+    }
+  };
+
+  const handleConnect = async (customToken = token, customPort = port, customSni = sni) => {
     setLoading(true);
     setError('');
     try {
@@ -18,15 +52,29 @@ export default function App() {
         await invoke('stop_proxy');
         setIsConnected(false);
       } else {
-        await invoke('start_proxy', { token, localPort: port, customSni: sni });
+        await invoke('start_proxy', { token: customToken, localPort: customPort, customSni: customSni });
         setIsConnected(true);
       }
     } catch (err: any) {
       setError(err.toString());
+      setIsConnected(false);
     } finally {
       setLoading(false);
     }
   };
+
+  // ЭФФЕКТ ДЛЯ АВТОМАТИЧЕСКОГО ПОДКЛЮЧЕНИЯ ПРИ СТАРТЕ ПРИЛОЖЕНИЯ
+  useEffect(() => {
+    const savedToken = localStorage.getItem('token') || '';
+    const savedAutoConnect = localStorage.getItem('autoConnect') === 'true';
+    if (savedAutoConnect && savedToken) {
+      // Инициализируем автоподключение с задержкой в 500мс для стабильности инициализации Tauri
+      const timer = setTimeout(() => {
+        handleConnect(savedToken, port, sni);
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, []);
 
   const handleConfigureTelegram = async () => {
     try {
@@ -39,7 +87,7 @@ export default function App() {
 
   return (
     <div style={{ 
-      padding: '24px', 
+      padding: '20px', 
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', 
       backgroundColor: '#0c0e12', 
       color: '#e2e8f0',
@@ -51,7 +99,6 @@ export default function App() {
       userSelect: 'none'
     }}>
       
-      {/* КАРТОЧКА ИНТЕРФЕЙСА С НЕОНОВЫМ СВЕЧЕНИЕМ */}
       <div style={{
         backgroundColor: '#151922',
         borderRadius: '16px',
@@ -63,22 +110,21 @@ export default function App() {
         transition: 'all 0.4s ease',
         display: 'flex',
         flexDirection: 'column',
-        gap: '16px'
+        gap: '14px'
       }}>
         
-        {/* ШАПКА И СТАТУС-ПУЛЬСАР */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+        {/* ХЕДЕР С ПУЛЬСАРОМ */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
           <div>
-            <h2 style={{ margin: 0, fontSize: '20px', fontWeight: '700', letterSpacing: '-0.5px' }}>
+            <h2 style={{ margin: 0, fontSize: '18px', fontWeight: '700', letterSpacing: '-0.5px' }}>
               StealthSurf <span style={{ color: '#0088cc' }}>Proxy</span>
             </h2>
-            <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#64748b' }}>
+            <p style={{ margin: '4px 0 0 0', fontSize: '11px', color: '#64748b' }}>
               Локальный Telegram-клиент
             </p>
           </div>
           
-          {/* Пульсирующий индикатор */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', backgroundColor: '#1c2230', padding: '6px 12px', borderRadius: '20px', border: '1px solid #2d3748' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', backgroundColor: '#1c2230', padding: '4px 10px', borderRadius: '20px', border: '1px solid #2d3748' }}>
             <span style={{
               width: '8px',
               height: '8px',
@@ -88,13 +134,12 @@ export default function App() {
               display: 'inline-block',
               animation: 'pulse 1.5s infinite ease-in-out'
             }} />
-            <span style={{ fontSize: '11px', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5px', color: isConnected ? '#10b981' : '#f43f5e' }}>
+            <span style={{ fontSize: '10px', fontWeight: 'bold', textTransform: 'uppercase', color: isConnected ? '#10b981' : '#f43f5e' }}>
               {isConnected ? 'ONLINE' : 'OFFLINE'}
             </span>
           </div>
         </div>
 
-        {/* CSS АНИМАЦИЯ ПУЛЬСАРА (Добавим динамический тег style) */}
         <style dangerouslySetInnerHTML={{__html: `
           @keyframes pulse {
             0% { opacity: 0.6; }
@@ -103,10 +148,10 @@ export default function App() {
           }
         `}} />
 
-        {/* ГРУППА ПОЛЕЙ ВВОДА */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        {/* ПОЛЯ ВВОДА */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
           <div>
-            <label style={{ display: 'block', marginBottom: '6px', fontSize: '12px', color: '#94a3b8', fontWeight: '500' }}>
+            <label style={{ display: 'block', marginBottom: '4px', fontSize: '11px', color: '#94a3b8' }}>
               StealthSurf API Token
             </label>
             <input 
@@ -117,24 +162,21 @@ export default function App() {
               disabled={isConnected}
               style={{ 
                 width: '100%', 
-                padding: '10px 14px', 
+                padding: '8px 12px', 
                 borderRadius: '8px', 
                 border: '1px solid #2d3748', 
                 backgroundColor: '#1c2230', 
                 color: '#fff',
                 outline: 'none',
-                fontSize: '14px',
+                fontSize: '13px',
                 boxSizing: 'border-box',
-                transition: 'border-color 0.2s',
               }}
-              onFocus={(e) => e.target.style.borderColor = '#0088cc'}
-              onBlur={(e) => e.target.style.borderColor = '#2d3748'}
             />
           </div>
 
-          <div style={{ display: 'flex', gap: '12px' }}>
+          <div style={{ display: 'flex', gap: '10px' }}>
             <div style={{ flex: 1 }}>
-              <label style={{ display: 'block', marginBottom: '6px', fontSize: '12px', color: '#94a3b8', fontWeight: '500' }}>
+              <label style={{ display: 'block', marginBottom: '4px', fontSize: '11px', color: '#94a3b8' }}>
                 Маскировка (SNI)
               </label>
               <input 
@@ -145,23 +187,20 @@ export default function App() {
                 disabled={isConnected}
                 style={{ 
                   width: '100%', 
-                  padding: '10px 14px', 
+                  padding: '8px 12px', 
                   borderRadius: '8px', 
                   border: '1px solid #2d3748', 
                   backgroundColor: '#1c2230', 
                   color: '#fff',
                   outline: 'none',
-                  fontSize: '14px',
-                  boxSizing: 'border-box',
-                  transition: 'border-color 0.2s'
+                  fontSize: '13px',
+                  boxSizing: 'border-box'
                 }}
-                onFocus={(e) => e.target.style.borderColor = '#0088cc'}
-                onBlur={(e) => e.target.style.borderColor = '#2d3748'}
               />
             </div>
 
-            <div style={{ width: '120px' }}>
-              <label style={{ display: 'block', marginBottom: '6px', fontSize: '12px', color: '#94a3b8', fontWeight: '500' }}>
+            <div style={{ width: '90px' }}>
+              <label style={{ display: 'block', marginBottom: '4px', fontSize: '11px', color: '#94a3b8' }}>
                 Порт
               </label>
               <input 
@@ -171,98 +210,107 @@ export default function App() {
                 disabled={isConnected}
                 style={{ 
                   width: '100%', 
-                  padding: '10px 14px', 
+                  padding: '8px 12px', 
                   borderRadius: '8px', 
                   border: '1px solid #2d3748', 
                   backgroundColor: '#1c2230', 
                   color: '#fff',
                   outline: 'none',
-                  fontSize: '14px',
+                  fontSize: '13px',
                   boxSizing: 'border-box',
-                  transition: 'border-color 0.2s',
                   textAlign: 'center'
                 }}
-                onFocus={(e) => e.target.style.borderColor = '#0088cc'}
-                onBlur={(e) => e.target.style.borderColor = '#2d3748'}
               />
             </div>
           </div>
         </div>
 
-        {/* ПЛАШКА ОШИБКИ */}
+        {/* НАСТРОЙКИ АВТОЗАПУСКА И АВТОПОДКЛЮЧЕНИЯ */}
+        <div style={{ 
+          display: 'flex', 
+          flexDirection: 'column', 
+          gap: '8px', 
+          backgroundColor: '#1c2230', 
+          padding: '12px', 
+          borderRadius: '10px',
+          border: '1px solid #2d3748'
+        }}>
+          {/* Автозапуск */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: '12px', color: '#94a3b8' }}>Запускать вместе с Windows</span>
+            <input 
+              type="checkbox" 
+              checked={autostart} 
+              onChange={(e) => handleToggleAutostart(e.target.checked)}
+              style={{ cursor: 'pointer', width: '16px', height: '16px' }}
+            />
+          </div>
+          
+          {/* Автоподключение */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: '12px', color: '#94a3b8' }}>Подключать прокси при старте</span>
+            <input 
+              type="checkbox" 
+              checked={autoConnect} 
+              onChange={(e) => setAutoConnect(e.target.checked)}
+              style={{ cursor: 'pointer', width: '16px', height: '16px' }}
+            />
+          </div>
+        </div>
+
         {error && (
           <div style={{ 
             color: '#f43f5e', 
             backgroundColor: 'rgba(244, 63, 94, 0.1)', 
             border: '1px solid rgba(244, 63, 94, 0.2)',
-            padding: '12px', 
+            padding: '10px', 
             borderRadius: '8px', 
-            fontSize: '13px',
-            lineHeight: '1.4'
+            fontSize: '12px'
           }}>
             ⚠️ {error}
           </div>
         )}
 
-        {/* КНОПКА ЗАПУСКА */}
         <button 
-          onClick={handleConnect} 
+          onClick={() => handleConnect()} 
           disabled={loading}
           style={{
             width: '100%',
-            padding: '14px',
-            borderRadius: '10px',
+            padding: '12px',
+            borderRadius: '8px',
             backgroundColor: isConnected ? '#e03e3e' : '#0088cc',
             color: '#fff',
             border: 'none',
             cursor: 'pointer',
-            fontSize: '15px',
+            fontSize: '14px',
             fontWeight: '600',
             transition: 'all 0.3s ease',
             boxShadow: isConnected 
-              ? '0 4px 14px rgba(224, 62, 62, 0.3)' 
-              : '0 4px 14px rgba(0, 136, 204, 0.3)',
-            marginTop: '8px'
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.filter = 'brightness(1.1)';
-            e.currentTarget.style.transform = 'translateY(-1px)';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.filter = 'brightness(1)';
-            e.currentTarget.style.transform = 'translateY(0)';
+              ? '0 4px 14px rgba(224, 62, 62, 0.2)' 
+              : '0 4px 14px rgba(0, 136, 204, 0.2)',
           }}
         >
-          {loading ? 'Секунду...' : isConnected ? 'Остановить подключение' : 'Активировать прокси'}
+          {loading ? 'Секунду...' : isConnected ? 'Остановить прокси' : 'Активировать прокси'}
         </button>
 
-        {/* КНОПКА TELEGRAM */}
         {isConnected && (
           <button 
             onClick={handleConfigureTelegram}
             style={{
               width: '100%',
-              padding: '14px',
-              borderRadius: '10px',
+              padding: '12px',
+              borderRadius: '8px',
               backgroundColor: '#229ED9',
               color: 'white',
               border: 'none',
               cursor: 'pointer',
-              fontSize: '15px',
+              fontSize: '14px',
               fontWeight: '600',
-              boxShadow: '0 4px 14px rgba(34, 158, 217, 0.3)',
+              boxShadow: '0 4px 14px rgba(34, 158, 217, 0.2)',
               transition: 'all 0.3s ease',
             }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.filter = 'brightness(1.1)';
-              e.currentTarget.style.transform = 'translateY(-1px)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.filter = 'brightness(1)';
-              e.currentTarget.style.transform = 'translateY(0)';
-            }}
           >
-            Интегрировать в Telegram ✈️
+            Применить прокси в Telegram ✈️
           </button>
         )}
       </div>

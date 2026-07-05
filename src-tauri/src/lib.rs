@@ -6,7 +6,6 @@ use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 use serde_json::json;
 
-// Подключаем необходимые модули для системного трея и меню в Tauri v2
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
@@ -24,7 +23,6 @@ async fn start_proxy(
     local_port: u16,
     custom_sni: String
 ) -> Result<(), String> {
-    // 1. Получаем конфигурации StealthSurf
     let client = reqwest::Client::new();
     let response = client
         .get("https://api.stealthsurf.net/configs") 
@@ -44,7 +42,6 @@ async fn start_proxy(
 
     let connection_url = config_node["connection_url"].as_str().ok_or("Поле connection_url отсутствует")?;
 
-    // 2. Парсим VLESS-ссылку
     let parsed_url = url::Url::parse(connection_url).map_err(|e| format!("Ошибка парсинга ссылки: {}", e))?;
     
     let uuid = parsed_url.username().to_string();
@@ -72,7 +69,6 @@ async fn start_proxy(
         sni = custom_sni; 
     }
 
-    // 3. Формируем конфиг sing-box
     let singbox_config = json!({
         "inbounds": [
             {
@@ -116,7 +112,6 @@ async fn start_proxy(
         }
     });
 
-    // Сохраняем файл
     let app_dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
     let config_path = app_dir.join("singbox_config.json");
@@ -124,7 +119,6 @@ async fn start_proxy(
     let mut file = File::create(&config_path).map_err(|e| e.to_string())?;
     file.write_all(singbox_config.to_string().as_bytes()).map_err(|e| e.to_string())?;
 
-    // 4. Запускаем sing-box
     let shell = app.shell();
     let sidecar_command = shell
         .sidecar("sing-box")
@@ -135,7 +129,6 @@ async fn start_proxy(
         .spawn()
         .map_err(|e| format!("Ошибка запуска процесса sing-box: {}", e))?;
 
-    // Перехват логов
     tauri::async_runtime::spawn(async move {
         use tauri_plugin_shell::process::CommandEvent;
         while let Some(event) = rx.recv().await {
@@ -201,6 +194,52 @@ fn open_telegram(port: u16) -> Result<(), String> {
     Ok(())
 }
 
+// ----------------------------------------------------
+// НОВАЯ КОМАНДА: УПРАВЛЕНИЕ АВТОЗАПУСКОМ В РЕЕСТРЕ WINDOWS
+// ----------------------------------------------------
+#[tauri::command]
+fn set_autostart(enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let exe_path = std::env::current_exe()
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .to_string();
+
+        if enabled {
+            // Прописываем запуск нашего exe с флагом --autostart
+            let exe_path_with_arg = format!("\"{}\" --autostart", exe_path);
+            std::process::Command::new("reg")
+                .args([
+                    "add",
+                    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                    "/v",
+                    "tgproxy",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    &exe_path_with_arg,
+                    "/f",
+                ])
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        } else {
+            // Удаляем запись из реестра
+            std::process::Command::new("reg")
+                .args([
+                    "delete",
+                    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                    "/v",
+                    "tgproxy",
+                    "/f",
+                ])
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -208,37 +247,41 @@ pub fn run() {
         .manage(ProxyState {
             child_process: Mutex::new(None),
         })
-        .invoke_handler(tauri::generate_handler![start_proxy, stop_proxy, open_telegram])
-        // ----------------------------------------------------
-        // НАСТРОЙКА СВОРАЧИВАНИЯ В ТРЕЙ ПРИ НАЖАТИИ НА КРЕСТИК (X)
-        // ----------------------------------------------------
+        // Регистрируем новую команду автозагрузки в Tauri
+        .invoke_handler(tauri::generate_handler![start_proxy, stop_proxy, open_telegram, set_autostart])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 window.hide().unwrap();
-                api.prevent_close(); // Предотвращаем закрытие процесса
+                api.prevent_close(); 
             }
         })
-        // ----------------------------------------------------
-        // ИНИЦИАЛИЗАЦИЯ СИСТЕМНОГО ТРЕЯ (Tauri v2)
-        // ----------------------------------------------------
         .setup(|app| {
-            // Исправленные названия переменных: show_item и quit_item
+            // ----------------------------------------------------
+            // ПРОВЕРКА ЗАПУСКА: ЕСЛИ ИЗ АВТОЗАГРУЗКИ — ЗАПУСКАЕМ СВЕРНУТЫМ
+            // ----------------------------------------------------
+            let args: Vec<String> = std::env::args().collect();
+            let start_minimized = args.iter().any(|arg| arg == "--autostart");
+
+            if start_minimized {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.hide().unwrap(); // Прячем окно сразу при старте ОС
+                }
+            }
+
             let quit_item = MenuItem::with_id(app, "quit", "Выйти", true, None::<&str>)?;
             let show_item = MenuItem::with_id(app, "show", "Показать окно", true, None::<&str>)?;
             
-            // Здесь мы тоже передаем исправленные show_item и quit_item
             let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
-            // Инициализация иконки трея (используем дефолтную иконку окна)
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("StealthSurf TG Proxy")
                 .menu(&tray_menu)
-                .show_menu_on_left_click(false) // Отключаем меню по левому клику, чтобы вешать кастомное событие
+                .show_menu_on_left_click(false) 
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
                         "quit" => {
-                            app.exit(0); // Выход из приложения
+                            app.exit(0); 
                         }
                         "show" => {
                             if let Some(window) = app.get_webview_window("main") {
@@ -250,17 +293,12 @@ pub fn run() {
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
-                    // Переключаем видимость окна при клике ЛЕВОЙ кнопкой мыши по иконке в трее
+                    // ФИКС КЛИКА: Теперь левый клик всегда показывает/фокусирует окно
                     if let TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
-                            let is_visible = window.is_visible().unwrap_or(false);
-                            if is_visible {
-                                window.hide().unwrap();
-                            } else {
-                                window.show().unwrap();
-                                window.set_focus().unwrap();
-                            }
+                            window.show().unwrap();
+                            window.set_focus().unwrap();
                         }
                     }
                 })
